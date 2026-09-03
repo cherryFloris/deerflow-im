@@ -1,0 +1,21 @@
+{
+  "name": "deerflow-im-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone IM bridge that brings dsh-im-style multi-bot channel management to DeerFlow without touching DeerFlow source. Bridges Feishu and personal WeChat (iLink, ported from dsh-im) to DeerFlow Gateway via PAT-authenticated REST/SSE.",
+  "engines": {
+    "node": ">=22.21"
+  },
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "dev": "node --watch --env-file=.env src/index.js",
+    "check": "node --check src/index.js",
+    "build:ui": "cd admin-ui && npm install && npm run admin:build"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.40.0",
+    "express": "^4.19.2",
+    "qrcode": "^1.5.4"
+  }
+}
