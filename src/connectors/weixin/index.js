@@ -343,7 +343,10 @@ function listLoggedInTokens() {
     .slice(-10);
 }
 
-export async function beginLogin() {
+// opts: { deerflowUserId, deerflowPat } — when the bind is started by a logged-in
+// DeerFlow user, these are carried on the attempt and persisted onto the bot when
+// the scan completes (see activateAccount), so the bot's threads belong to that user.
+export async function beginLogin(opts = {}) {
   if ([...attempts.values()].some((a) => !["connected", "expired", "failed", "cancelled"].includes(a.state))) {
     throw new Error("已有进行中的微信绑定流程，请先完成或取消。");
   }
@@ -359,6 +362,8 @@ export async function beginLogin() {
     error: null,
     botId: null,
     task: null,
+    deerflowUserId: opts.deerflowUserId || null,
+    deerflowPat: opts.deerflowPat || null,
   };
   attempts.set(record.id, record);
   try {
@@ -453,6 +458,14 @@ async function activateAccount(record, { token, accountId, ownerUserId, baseUrl 
     store.upsertBot(created);
   }
   record.botId = identity.botId;
+  // Tie the bot to the DeerFlow user who started the bind (if any). Re-binding the
+  // same WeChat account by a different user re-points the bot at that user.
+  if (record.deerflowUserId || record.deerflowPat) {
+    store.setBotDeerflowUser(identity.botId, {
+      deerflowUserId: record.deerflowUserId,
+      deerflowPat: record.deerflowPat,
+    });
+  }
   const bot = store.getBot(identity.botId);
   await weixin.startBot(bot);
   return identity.botId;

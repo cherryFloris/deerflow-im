@@ -22,6 +22,121 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: "admin token required" });
 }
 
+// ---------- DeerFlow user context (per-user WeChat binding) ----------
+//
+// im-bridge is served same-origin with DeerFlow behind nginx (/im-bridge/), so a
+// logged-in DeerFlow session cookie arrives on requests from the admin UI. We
+// resolve it against DeerFlow's /api/v1/auth/me to learn *which* user is binding,
+// then mint a PAT for them (POST /api/v1/auth/pats) so that bot's threads are owned
+// by that user instead of all landing under the single global DEERFLOW_PAT account.
+const DF_USER_CACHE_TTL_MS = 60_000;
+const dfUserCache = new Map(); // access_token -> { user, expiresAt }
+
+function parseCookies(header) {
+  const out = {};
+  if (!header) return out;
+  for (const part of String(header).split(";")) {
+    const idx = part.indexOf("=");
+    if (idx < 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+async function resolveDeerFlowUser(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const accessToken = cookies["access_token"];
+  if (!accessToken) return null;
+
+  const cached = dfUserCache.get(accessToken);
+  if (cached && cached.expiresAt > Date.now()) return cached.user;
+
+  // Forward both cookies: /api/v1/auth/pats is NOT in DeerFlow's _AUTH_EXEMPT_PATHS,
+  // so it goes through the CSRF double-submit check (csrf_token cookie must match
+  // the X-CSRF-Token header). Dropping csrf_token here makes PAT signing 403.
+  const cookieParts = [`access_token=${accessToken}`];
+  if (cookies["csrf_token"]) cookieParts.push(`csrf_token=${cookies["csrf_token"]}`);
+  const cookieHeader = cookieParts.join("; ");
+  try {
+    const resp = await fetch(`${config.gatewayUrl}/api/v1/auth/me`, {
+      method: "GET",
+      headers: { Cookie: cookieHeader },
+    });
+    if (!resp.ok) return null;
+    const user = await resp.json().catch(() => null);
+    if (!user || !user.id) return null;
+    const resolved = {
+      userId: String(user.id),
+      email: user.email || "",
+      cookie: cookieHeader,
+      csrfToken: cookies["csrf_token"] || "",
+    };
+    dfUserCache.set(accessToken, { user: resolved, expiresAt: Date.now() + DF_USER_CACHE_TTL_MS });
+    return resolved;
+  } catch (e) {
+    logger.warn("admin", "无法校验 DeerFlow 会话", e?.message);
+    return null;
+  }
+}
+
+// Mint a PAT for the user behind this session. /api/v1/auth/pats is session
+// (not PAT) authenticated, so it needs the CSRF double-submit token too.
+async function signDeerflowPat(user) {
+  const resp = await fetch(`${config.gatewayUrl}/api/v1/auth/pats`, {
+    method: "POST",
+    headers: {
+      Cookie: user.cookie,
+      "X-CSRF-Token": user.csrfToken,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: "im-bridge-auto",
+      scopes: ["threads:read", "threads:write", "runs:create", "runs:read"],
+      expires_in_days: 365,
+    }),
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`DeerFlow 签发 PAT 失败 ${resp.status}：${body}`);
+  }
+  const json = await resp.json().catch(() => null);
+  if (!json?.token) throw new Error("DeerFlow 签发 PAT 未返回 token");
+  return json.token;
+}
+
+// WeChat binding may be started by an operator with the admin token, or by a
+// logged-in DeerFlow user (the normal per-user flow). Anything else is a 401.
+// Auth only — PAT signing happens in the provision.begin handler so that polling
+// the QR status does not mint a fresh PAT on every request.
+async function requireBindAuth(req, res, next) {
+  if (config.adminToken) {
+    const h =
+      req.headers["authorization"]?.replace(/^Bearer\s+/i, "") || req.headers["x-admin-token"];
+    if (h && h === config.adminToken) return next();
+  }
+  const dfUser = await resolveDeerFlowUser(req);
+  if (!dfUser) {
+    return res.status(401).json({ error: "需要管理员令牌，或先登录 DeerFlow 账号后再连接微信。" });
+  }
+  req.dfUser = dfUser;
+  return next();
+}
+
+// Build the per-user context for a bind, falling back to no PAT (global config.pat)
+// when the caller has no DeerFlow session or the PAT could not be minted.
+async function bindUserContext(req) {
+  const dfUser = req.dfUser || (await resolveDeerFlowUser(req));
+  if (!dfUser) return {};
+  try {
+    return { deerflowUserId: dfUser.userId, deerflowPat: await signDeerflowPat(dfUser) };
+  } catch (e) {
+    logger.warn("admin", "为当前用户签发 DeerFlow PAT 失败，回退到全局 PAT", e?.message);
+    return { deerflowUserId: dfUser.userId, deerflowPat: null };
+  }
+}
+
 export function createAdminApp() {
   const app = express();
   app.use(express.json());
@@ -61,28 +176,33 @@ export function createAdminApp() {
     if (!channel || !endpoint) {
       return res.status(400).json({ error: "channel and endpoint are required" });
     }
-    const result = await dispatchRpc(channel, endpoint, payload || {}, req.signal);
+    // Attribute a WeChat bind to the logged-in DeerFlow user. The admin token is
+    // injected into the page for every visitor, so the session cookie (not the
+    // token) is what identifies the user.
+    const ctx = endpoint === "provision.begin" ? await bindUserContext(req) : {};
+    const result = await dispatchRpc(channel, endpoint, payload || {}, req.signal, ctx);
     // Errors from the Host contract are still HTTP 200 with { ok: false, error }.
     res.status(200).json(result);
   });
 
   // ----- Personal WeChat (iLink) QR-scan provisioning -----
-  app.post("/api/admin/weixin/login/begin", requireAdmin, async (_req, res) => {
+  app.post("/api/admin/weixin/login/begin", requireBindAuth, async (req, res) => {
     try {
-      const attempt = await beginLogin();
+      const ctx = await bindUserContext(req);
+      const attempt = await beginLogin(ctx);
       res.status(201).json(attempt);
     } catch (e) {
       res.status(409).json({ error: e.message });
     }
   });
 
-  app.get("/api/admin/weixin/login/:attemptId", requireAdmin, (req, res) => {
+  app.get("/api/admin/weixin/login/:attemptId", requireBindAuth, (req, res) => {
     const attempt = getLoginStatus(req.params.attemptId);
     if (!attempt) return res.status(404).json({ error: "login attempt not found" });
     res.json(attempt);
   });
 
-  app.post("/api/admin/weixin/login/:attemptId/cancel", requireAdmin, async (req, res) => {
+  app.post("/api/admin/weixin/login/:attemptId/cancel", requireBindAuth, async (req, res) => {
     try {
       const attempt = await cancelLogin(req.params.attemptId);
       res.json(attempt || { status: "cancelled" });

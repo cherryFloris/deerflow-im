@@ -158,6 +158,35 @@ export function setBotCredentials(id, credentials) {
   return b;
 }
 
+// ---------- Per-bot DeerFlow identity (who connected this bot) ----------
+//
+// A bot bound by a logged-in DeerFlow user carries that user's id plus a PAT
+// minted for them. core/conversation.js uses this PAT instead of the global
+// config.pat, so every thread the bot creates is owned by the user who
+// connected it — which is what makes "each user sees only their own threads"
+// work in the DeerFlow web UI (threads are filtered by the logged-in user).
+//
+// The PAT is stored as a credential so it is encrypted at rest by encrypt()
+// and masked to "********" by toPublicBot's credentialKeys.
+export function setBotDeerflowUser(id, { deerflowUserId, deerflowPat } = {}) {
+  const b = getBot(id);
+  if (!b) return null;
+  if (deerflowUserId != null) b.deerflowUserId = String(deerflowUserId);
+  if (deerflowPat != null) {
+    b.credentials = b.credentials || {};
+    b.credentials.__deerflowPat = encrypt(deerflowPat);
+  }
+  persistBots();
+  return b;
+}
+
+// Returns the decrypted per-bot PAT, or null when this bot has none.
+export function getBotDeerflowPat(id) {
+  const b = getBot(id);
+  if (!b || !b.credentials || !b.credentials.__deerflowPat) return null;
+  return decrypt(b.credentials.__deerflowPat);
+}
+
 // dsh-im UI fields (persisted, non-secret). These mirror the shapes the vendored
 // dsh-im React UI reads via normalizeBot/normalizeBotConnection.
 export function setBotWorkspace(id, workspace) {

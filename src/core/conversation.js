@@ -3,14 +3,23 @@
 // reply callback. Also implements the dsh-im-style slash commands.
 import * as store from "../store.js";
 import { DeerFlowClient } from "../deerflow/client.js";
+import { config } from "../config.js";
 import { logger } from "../logger.js";
 
-const client = new DeerFlowClient();
+// Threads are owned by whichever PAT authenticates the call. A bot bound by a
+// logged-in DeerFlow user carries that user's PAT (store.setBotDeerflowUser), so
+// threads it creates belong to that user and appear only for them in the DeerFlow
+// web UI. Bots without one fall back to the global config.pat.
+function clientForBot(botId) {
+  const pat = store.getBotDeerflowPat(botId) || config.pat;
+  return new DeerFlowClient({ pat });
+}
 
 async function resolveThread(ctx) {
   const { platform, botId, chatId, topicId } = ctx;
   const existing = store.getSession(platform, botId, chatId, topicId);
   if (existing && existing.threadId) return existing.threadId;
+  const client = clientForBot(botId);
   const threadId = await client.createThread();
   store.setSession(platform, botId, chatId, topicId, threadId, { userId: ctx.userId });
   logger.info("conv", `created thread ${threadId} for ${platform}/${botId}/${chatId}`);
@@ -76,6 +85,7 @@ async function runThread(ctx, text) {
 
 async function streamInto(threadId, ctx, text) {
   const { modelName, agentName } = await activeModelAgent(ctx);
+  const client = clientForBot(ctx.botId);
   await client.streamRun(
     threadId,
     text,
@@ -162,6 +172,7 @@ async function handleCommand(ctx, raw) {
 async function summarize(ctx) {
   const thread = store.getSession(ctx.platform, ctx.botId, ctx.chatId, ctx.topicId);
   if (!thread) return "(无对话内容)";
+  const client = clientForBot(ctx.botId);
   let historyText = "";
   try {
     const hist = await client.getHistory(thread.threadId, 60);

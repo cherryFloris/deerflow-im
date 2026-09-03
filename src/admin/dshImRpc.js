@@ -111,14 +111,17 @@ async function weixinStatus() {
   };
 }
 
-async function weixinDispatch(endpoint, payload = {}) {
+async function weixinDispatch(endpoint, payload = {}, ctx = {}) {
   switch (endpoint) {
     case "connection.status":
       return ok(await weixinStatus());
 
     case "provision.begin": {
       try {
-        const attempt = await beginLogin();
+        const attempt = await beginLogin({
+          deerflowUserId: ctx?.deerflowUserId,
+          deerflowPat: ctx?.deerflowPat,
+        });
         return ok(await weixinProvisioningToRpc(attempt));
       } catch (e) {
         return fail("WEIXIN_PROVISION_BEGIN_FAILED", e?.message || "无法生成微信二维码，请稍后重试。");
@@ -359,13 +362,16 @@ async function feishuDispatch(endpoint, payload = {}) {
 }
 
 // ---------- dispatcher ----------
-export async function dispatchRpc(channel, endpoint, payload = {}, signal) {
+// ctx: { deerflowUserId, deerflowPat } — the logged-in DeerFlow user resolved from
+// the request by admin/server.js. Passed down so a WeChat bind is attributed to
+// that user (their PAT creates the bot's threads).
+export async function dispatchRpc(channel, endpoint, payload = {}, signal, ctx = {}) {
   try {
     if (channel === "/weixin" || channel === "weixin") {
-      return await weixinDispatch(endpoint, payload);
+      return await weixinDispatch(endpoint, payload, ctx);
     }
     if (channel === "/feishu" || channel === "feishu") {
-      return await feishuDispatch(endpoint, payload);
+      return await feishuDispatch(endpoint, payload, ctx);
     }
     return fail("UNKNOWN_CHANNEL", `不支持的渠道：${channel}`);
   } catch (e) {

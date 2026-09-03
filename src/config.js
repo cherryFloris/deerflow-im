@@ -1,5 +1,6 @@
 // Runtime configuration, sourced from environment variables.
 // No DeerFlow source is touched; this service only needs a PAT for the Gateway.
+import { logger } from "./logger.js";
 
 export const config = {
   // DeerFlow Gateway base URL. Inside the docker-compose network this is
@@ -31,11 +32,21 @@ export const config = {
   logLevel: (process.env.IM_BRIDGE_LOG_LEVEL || "info").toLowerCase(),
 };
 
+// The global PAT is now a fallback only, not a hard startup requirement.
+//
+// WeChat bots bound by a logged-in DeerFlow user carry their own per-bot PAT
+// (see store.setBotDeerflowUser / admin/server.js auto-signing), so those bots
+// work without a global PAT. It is still required as the fallback for bots
+// without a per-bot PAT (e.g. Feishu, or a WeChat bot bound by an admin token
+// with no DeerFlow session), so only warn here and let the actual call fail
+// with a clear error if neither is available.
 export function requirePat() {
   if (!config.pat) {
-    throw new Error(
-      "DEERFLOW_PAT is not set. Create a Personal Access Token in DeerFlow Gateway " +
-        "(POST /api/v1/auth/pats, scopes threads:read threads:write runs:create runs:read) and set it."
+    logger.warn(
+      "config",
+      "DEERFLOW_PAT is not set. WeChat bots bound by a logged-in DeerFlow user will use their " +
+        "per-bot PAT; bots without one (e.g. Feishu) will fail until DEERFLOW_PAT is set " +
+        "(POST /api/v1/auth/pats, scopes threads:read threads:write runs:create runs:read)."
     );
   }
   return config.pat;

@@ -8,8 +8,11 @@ import { logger } from "../logger.js";
 
 const ASSISTANT_ID = "lead_agent";
 
-function authHeaders() {
-  return { Authorization: `Bearer ${config.pat}`, "Content-Type": "application/json" };
+// Takes the PAT explicitly (rather than reading config.pat) so a client can act as
+// a specific DeerFlow user — see clientForBot() in core/conversation.js, which
+// passes the per-bot PAT minted for the user who connected that WeChat bot.
+function authHeaders(pat) {
+  return { Authorization: `Bearer ${pat}`, "Content-Type": "application/json" };
 }
 
 function contentToString(content) {
@@ -54,7 +57,7 @@ export class DeerFlowClient {
   async createThread(assistantId = ASSISTANT_ID) {
     const resp = await fetch(`${this.gatewayUrl}/api/threads`, {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(this.pat),
       body: JSON.stringify({ assistant_id: assistantId }),
     });
     if (!resp.ok) {
@@ -68,7 +71,7 @@ export class DeerFlowClient {
   async getHistory(threadId, limit = 50) {
     const resp = await fetch(`${this.gatewayUrl}/api/threads/${threadId}/history`, {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(this.pat),
       body: JSON.stringify({ limit }),
     });
     if (!resp.ok) {
@@ -102,7 +105,7 @@ export class DeerFlowClient {
 
     const resp = await fetch(`${this.gatewayUrl}/api/threads/${threadId}/runs/stream`, {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders(this.pat),
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
