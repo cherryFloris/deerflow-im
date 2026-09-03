@@ -15,12 +15,27 @@ function clientForBot(botId) {
   return new DeerFlowClient({ pat });
 }
 
+// DeerFlow's web UI already renders a per-thread channel badge from
+// metadata.channel_source (see frontend src/core/threads/utils.ts:
+// channelSourceOfThread + ThreadChannelBadge). The key is NOT server-reserved
+// (only owner_id/user_id are), so a PAT-authenticated client may set it freely —
+// no DeerFlow source change needed. Map im-bridge platform ids to the provider
+// names DeerFlow's label table recognizes (weixin -> wechat) so the badge reads
+// "WeChat" rather than the raw internal id.
+const CHANNEL_PROVIDER = { weixin: "wechat", feishu: "feishu" };
+function channelSourceFor(ctx) {
+  const provider = CHANNEL_PROVIDER[ctx.platform] || ctx.platform;
+  return { type: "im_channel", provider, connection_id: ctx.botId, topic_id: ctx.chatId };
+}
+
 async function resolveThread(ctx) {
   const { platform, botId, chatId, topicId } = ctx;
   const existing = store.getSession(platform, botId, chatId, topicId);
   if (existing && existing.threadId) return existing.threadId;
   const client = clientForBot(botId);
-  const threadId = await client.createThread();
+  const threadId = await client.createThread(undefined, {
+    channel_source: channelSourceFor(ctx),
+  });
   store.setSession(platform, botId, chatId, topicId, threadId, { userId: ctx.userId });
   logger.info("conv", `created thread ${threadId} for ${platform}/${botId}/${chatId}`);
   return threadId;
@@ -47,8 +62,14 @@ export async function handleInbound(ctx) {
     await runThread(ctx, text);
   } catch (e) {
     logger.error("conv", "run failed", e.message);
+    let message = `⚠️ 调用 DeerFlow 出错：${e.message}`;
+    if (isAuthError(e)) {
+      message =
+        "⚠️ DeerFlow 鉴权失败：当前机器人使用的访问令牌无效或已过期。" +
+        "若是飞书等无个人令牌的机器人，请在服务端 .env 配置有效的 DEERFLOW_PAT 后重启 im-bridge。";
+    }
     try {
-      await ctx.replyError(`⚠️ 调用 DeerFlow 出错：${e.message}`);
+      await ctx.replyError(message);
     } catch {
       /* ignore */
     }
@@ -67,13 +88,32 @@ function isActiveRunError(e) {
   return m.includes("409") || m.includes("already has an active run");
 }
 
+// A thread cached in sessions.json can vanish server-side (deleted, or the
+// container was reset without the cache), after which streamRun returns HTTP 404
+// ("Thread ... not found"). Without recovery the conversation is permanently
+// stuck: every message errors until the user manually sends /new. Treat it the
+// same as the busy case — drop the dead cached thread and retry once on a fresh
+// one.
+function isThreadGoneError(e) {
+  const m = e?.message || "";
+  return m.includes("404") || m.includes("not found");
+}
+
+// A 401 "Invalid token" means the PAT we used (per-bot user PAT, or the global
+// DEERFLOW_PAT fallback for bots like Feishu) is missing/expired. Retrying on a
+// new thread cannot fix it — surface a clear, actionable message instead.
+function isAuthError(e) {
+  const m = e?.message || "";
+  return m.includes("401") || m.includes("Invalid token") || m.includes("Unauthorized");
+}
+
 async function runThread(ctx, text) {
   let threadId = await resolveThread(ctx);
   try {
     await streamInto(threadId, ctx, text);
   } catch (e) {
-    if (isActiveRunError(e)) {
-      logger.warn("conv", "thread busy, retrying on a fresh thread", e.message);
+    if (isActiveRunError(e) || isThreadGoneError(e)) {
+      logger.warn("conv", "thread unrecoverable, retrying on a fresh thread", e.message);
       store.clearSession(ctx.platform, ctx.botId, ctx.chatId, ctx.topicId);
       threadId = await resolveThread(ctx);
       await streamInto(threadId, ctx, text);

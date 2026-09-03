@@ -54,11 +54,13 @@ export class DeerFlowClient {
     this.pat = pat;
   }
 
-  async createThread(assistantId = ASSISTANT_ID) {
+  async createThread(assistantId = ASSISTANT_ID, metadata = {}) {
+    const body = { assistant_id: assistantId };
+    if (metadata && Object.keys(metadata).length) body.metadata = metadata;
     const resp = await fetch(`${this.gatewayUrl}/api/threads`, {
       method: "POST",
       headers: authHeaders(this.pat),
-      body: JSON.stringify({ assistant_id: assistantId }),
+      body: JSON.stringify(body),
     });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
